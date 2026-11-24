@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Hand Orbs - Ao Aka Murasaki</title>
+<style>
+:root{--bg:#0b0d14;--fg:#e8eaf2;--card:#151826;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Noto Sans Thai",sans-serif;display:flex;flex-direction:column;align-items:center;gap:12px;padding:12px;min-height:100vh}
+h1{font-size:18px;margin:4px 0 0}
+#stage{position:relative;width:100%;max-width:720px;aspect-ratio:4/3;background:#000;border-radius:14px;overflow:hidden}
+video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}
+#status{font-size:14px;opacity:.9;text-align:center;min-height:20px}
+button{background:#3b82f6;color:#fff;border:0;border-radius:10px;padding:12px 22px;font-size:16px;cursor:pointer}
+.legend{display:flex;gap:6px 14px;font-size:13px;flex-wrap:wrap;justify-content:center;max-width:720px;line-height:1.6}
+.dot{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:5px;vertical-align:middle}
+details{max-width:720px;width:100%;background:var(--card);border-radius:10px;padding:10px 14px;font-size:13px}
+summary{cursor:pointer}
+details label{display:block;margin-top:8px}
+</style>
+</head>
+<body>
+<h1>🔵🔴🟣 Ao · Aka · Murasaki</h1>
+<div class="legend">
+  <span><i class="dot" style="background:#3b82f6"></i>แบมือขวา = ฟ้า (Ao)</span>
+  <span><i class="dot" style="background:#ef4444"></i>แบมือซ้าย = แดง (Aka)</span>
+  <span><i class="dot" style="background:#a855f7"></i>ประสานมือ = ม่วง (Murasaki)</span>
+  <span>✊ กำมือ = ระเบิด</span>
+  <span>🤏 ทำท่านิ้วชี้งอใต้โป้ง = ชาร์จ → ดีดนิ้วชี้ออก = ปล่อยบอลม่วง</span>
+</div>
+<div id="stage"><video id="v" playsinline muted></video><canvas id="c"></canvas></div>
+<div id="status">กด “เริ่มกล้อง” แล้วอนุญาตการใช้กล้อง</div>
+<button id="btn">เริ่มกล้อง</button>
+<details>
+  <summary>🔊 ใส่ไฟล์เสียงของคุณเอง (ไม่บังคับ)</summary>
+  <div>ถ้าไม่ใส่ จะใช้เสียงพูดภาษาญี่ปุ่นจากเบราว์เซอร์ + เสียงเอฟเฟกต์แทน</div>
+  <label>Ao (ฟ้า): <input type="file" accept="audio/*" data-k="ao"></label>
+  <label>Aka (แดง): <input type="file" accept="audio/*" data-k="aka"></label>
+  <label>Murasaki (ม่วง): <input type="file" accept="audio/*" data-k="murasaki"></label>
+</details>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+<script>
+const v=document.getElementById('v'),c=document.getElementById('c'),ctx=c.getContext('2d');
+const st=document.getElementById('status'),btn=document.getElementById('btn');
+const COL={right:'#3b82f6',left:'#ef4444',mix:'#a855f7'};
+const KIND={right:'ao',left:'aka',mix:'murasaki'};
+const state={right:{x:0,y:0,r:0,a:0},left:{x:0,y:0,r:0,a:0},mix:{x:0,y:0,r:30,a:0}};
+let loadedAt=0,loadedSide=null,t=0,mergeAt=-9999,noMergeUntil=0,lastFlick=0,lastMixT=null,shot=null;
+const P=[],RING=[],hist={right:[],left:[]};
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+const d3=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y,(a.z-b.z));
+
+/* ---------- AUDIO ---------- */
+let AC=null;const custom={};
+document.querySelectorAll('input[type=file]').forEach(i=>i.onchange=e=>{
+  const f=e.target.files[0];if(f)custom[i.dataset.k]=URL.createObjectURL(f);
+});
+function noise(dur){
+  const b=AC.createBuffer(1,AC.sampleRate*dur,AC.sampleRate),d=b.getChannelData(0);
+  for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;
+  const s=AC.createBufferSource();s.buffer=b;return s;
+}
+function tone(type,f0,f1,dur,peak,delay=0){
+  const t0=AC.currentTime+delay,o=AC.createOscillator(),g=AC.createGain();
+  o.type=type;o.frequency.setValueAtTime(f0,t0);o.frequency.exponentialRampToValueAtTime(f1,t0+dur);
+  g.gain.setValueAtTime(.0001,t0);g.gain.exponentialRampToValueAtTime(peak,t0+dur*.2);
+  g.gain.exponentialRampToValueAtTime(.0001,t0+dur);
+  o.connect(g).connect(AC.destination);o.start(t0);o.stop(t0+dur+.05);
+}
+function hiss(dur,type,freq,peak,delay=0){
+  const t0=AC.currentTime+delay,n=noise(dur),f=AC.createBiquadFilter(),g=AC.createGain();
+  f.type=type;f.frequency.setValueAtTime(freq,t0);f.frequency.exponentialRampToValueAtTime(Math.max(60,freq/6),t0+dur);
+  g.gain.setValueAtTime(peak,t0);g.gain.exponentialRampToValueAtTime(.0001,t0+dur);
+  n.connect(f).connect(g).connect(AC.destination);n.start(t0);
+}
+function sfx(k){
+  if(!AC)return;
+  if(k==='aka'){tone('sawtooth',120,900,.7,.18);hiss(.6,'highpass',3000,.12);}
+  else if(k==='ao'){tone('sine',1000,140,.9,.3);tone('triangle',500,70,.9,.2);}
+  else if(k==='murasaki'){tone('square',60,40,1.6,.25);tone('sawtooth',220,55,1.4,.12);hiss(1.2,'lowpass',2500,.2);}
+  else if(k==='boom'){tone('sine',140,35,.8,.5);hiss(.9,'lowpass',4000,.5);}
+  else if(k==='launch'){tone('sawtooth',90,1400,1.0,.2);hiss(1.2,'bandpass',2500,.25);tone('sine',70,30,1.4,.4,.9);}
+}
+const SAY={aka:'術式反転、赫',ao:'術式順転、蒼',murasaki:'虚式、茈'};
+function voice(k){
+  if(custom[k]){try{new Audio(custom[k]).play()}catch(e){}return;}
+  if(!('speechSynthesis' in window))return;
+  const u=new SpeechSynthesisUtterance(SAY[k]);u.lang='ja-JP';u.pitch=.6;u.rate=.9;
+  speechSynthesis.cancel();speechSynthesis.speak(u);
+}
+const lastCast={};
+function cast(k){
+  const n=performance.now();if(lastCast[k]&&n-lastCast[k]<1800)return;
+  lastCast[k]=n;sfx(k);voice(k);
+}
+
+/* ---------- GESTURES ---------- */
+const TIPS=[[8,6],[12,10],[16,14],[20,18]];
+function curledCount(l){let n=0;TIPS.forEach(([a,b])=>{if(d3(l[a],l[0])<d3(l[b],l[0])*1.0)n++});return n}
+function extCount(l){let n=0;TIPS.forEach(([a,b])=>{if(d3(l[a],l[0])>d3(l[b],l[0])*1.15)n++});return n}
+function boxOf(l){
+  let x0=1,y0=1,x1=0,y1=0;
+  l.forEach(p=>{x0=Math.min(x0,p.x);y0=Math.min(y0,p.y);x1=Math.max(x1,p.x);y1=Math.max(y1,p.y)});
+  return{x0:x0-.03,y0:y0-.03,x1:x1+.03,y1:y1+.03};
+}
+function overlap(a,b){
+  const ix=Math.max(0,Math.min(a.x1,b.x1)-Math.max(a.x0,b.x0)),iy=Math.max(0,Math.min(a.y1,b.y1)-Math.max(a.y0,b.y0));
+  const ar=(a.x1-a.x0)*(a.y1-a.y0),br=(b.x1-b.x0)*(b.y1-b.y0);
+  return ix*iy/Math.min(ar,br);
+}
+function isPose(l){
+  // loaded flick: thumb pressed on curled index, middle + ring extended (3D, any angle)
+  const ps=d3(l[0],l[9]);
+  const pinch=Math.min(d3(l[4],l[8]),d3(l[4],l[7]),d3(l[4],l[6]))<ps*.55;
+  return pinch
+    && d3(l[8],l[0])<d3(l[6],l[0])*1.15
+    && d3(l[12],l[0])>d3(l[10],l[0])*1.0
+    && d3(l[16],l[0])>d3(l[14],l[0])*1.0;
+}
+
+/* ---------- DRAWING ---------- */
+function drawBox(b,color,solid){
+  const W=c.width,H=c.height;
+  ctx.lineWidth=3;ctx.strokeStyle=color;ctx.globalAlpha=solid?1:.5;ctx.setLineDash(solid?[]:[8,6]);
+  ctx.beginPath();ctx.roundRect(b.x0*W,b.y0*H,(b.x1-b.x0)*W,(b.y1-b.y0)*H,10);ctx.stroke();
+  ctx.setLineDash([]);ctx.globalAlpha=1;
+}
+function drawOrb(x,y,r,color,al){
+  ctx.save();ctx.globalAlpha=Math.min(1,al);ctx.shadowColor=color;ctx.shadowBlur=r*.9;
+  const g=ctx.createRadialGradient(x-r*.35,y-r*.35,r*.08,x,y,r);
+  g.addColorStop(0,'#fff');g.addColorStop(.25,color);g.addColorStop(1,'#000000aa');
+  ctx.fillStyle=g;ctx.beginPath();ctx.arc(x,y,Math.max(1,r),0,7);ctx.fill();ctx.restore();
+}
+function showOrb(o,color,kind,tg){
+  if(tg){
+    if(o.a<.05){o.x=tg.x;o.y=tg.y;o.r=tg.r;cast(kind)}
+    o.x+=(tg.x-o.x)*.35;o.y+=(tg.y-o.y)*.35;o.r+=(tg.r-o.r)*.35;o.a+=(1-o.a)*.25;
+  }else o.a*=.6;
+  if(o.a>.02)drawOrb(o.x,o.y,o.r*(1+Math.sin(t*3)*.04),color,o.a);
+}
+function burst(x,y,r,color,n,sp){
+  for(let i=0;i<n;i++){
+    const a=Math.random()*6.283,s=(2+Math.random()*10)*sp*(r/40+.5);
+    P.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:1,dec:.014+Math.random()*.02,size:2+Math.random()*5,color});
+  }
+  RING.push({x,y,r,max:r*6*sp,color,life:1});
+}
+function explode(o,color){burst(o.x,o.y,o.r,color,110,1);sfx('boom');o.a=0}
+function launch(){
+  const m=state.mix;
+  shot={x0:m.x||c.width/2,y0:m.y||c.height*.7,r0:Math.max(30,m.r),t0:performance.now()};
+  m.a=0;noMergeUntil=performance.now()+1300;sfx('launch');
+}
+function drawFx(){
+  if(shot){
+    const p=Math.min(1,(performance.now()-shot.t0)/1400),e=p*p;
+    const x=shot.x0+(c.width/2-shot.x0)*e,y=shot.y0+(c.height*.42-shot.y0)*e,r=shot.r0*(1+e*5);
+    for(let i=0;i<4;i++)P.push({x:x+(Math.random()-.5)*r,y:y+(Math.random()-.5)*r,vx:(Math.random()-.5)*3,vy:(Math.random()-.5)*3,life:1,dec:.05,size:3+Math.random()*4,color:COL.mix});
+    drawOrb(x,y,r,COL.mix,p>.85?(1-p)/.15:1);
+    if(p>=1){burst(x,y,r,COL.mix,220,1.8);sfx('boom');shot=null}
+  }
+  ctx.save();ctx.globalCompositeOperation='lighter';
+  for(let i=RING.length-1;i>=0;i--){
+    const g=RING[i];g.life-=.03;g.r+=(g.max-g.r)*.12;
+    if(g.life<=0){RING.splice(i,1);continue}
+    ctx.globalAlpha=g.life;ctx.strokeStyle=g.color;ctx.lineWidth=8*g.life;
+    ctx.beginPath();ctx.arc(g.x,g.y,g.r,0,7);ctx.stroke();
+  }
+  for(let i=P.length-1;i>=0;i--){
+    const p=P[i];p.x+=p.vx;p.y+=p.vy;p.vx*=.96;p.vy*=.96;p.life-=p.dec;
+    if(p.life<=0){P.splice(i,1);continue}
+    ctx.globalAlpha=p.life;ctx.fillStyle=p.color;ctx.beginPath();ctx.arc(p.x,p.y,p.size*p.life,0,7);ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* ---------- MAIN ---------- */
+function onResults(res){
+  t+=.016;const W=c.width,H=c.height,now=performance.now();
+  ctx.clearRect(0,0,W,H);
+  const hands={right:null,left:null};
+  (res.multiHandLandmarks||[]).forEach((l,i)=>{
+    // input is not mirrored, so MediaPipe's label is swapped
+    let side=res.multiHandedness[i].label==='Left'?'right':'left';
+    if(hands[side])side=side==='right'?'left':'right';
+    if(!hands[side])hands[side]={l,b:boxOf(l),open:extCount(l)>=4,fist:curledCount(l)>=4};
+  });
+  const R=hands.right,L=hands.left;
+  const tg=h=>{const bw=(h.b.x1-h.b.x0)*W,bh=(h.b.y1-h.b.y0)*H;
+    return{x:(h.b.x0+h.b.x1)/2*W,y:(h.b.y0+h.b.y1)/2*H,r:Math.max(18,Math.min(bw,bh)*.38)}};
+
+  // clasp / press hands together -> purple
+  let merged=false,mt=null;
+  if(R&&L&&overlap(R.b,L.b)>.3){
+    const x0=Math.min(R.b.x0,L.b.x0),x1=Math.max(R.b.x1,L.b.x1),y0=Math.min(R.b.y0,L.b.y0),y1=Math.max(R.b.y1,L.b.y1);
+    mt={x:(x0+x1)/2*W,y:(y0+y1)/2*H,r:Math.max(26,Math.min((x1-x0)*W,(y1-y0)*H)*.4)};
+    merged=true;lastMixT=mt;
+  }else if(now-mergeAt<350&&!(R&&L)&&(R||L)&&lastMixT){merged=true;mt=lastMixT}
+  if(now<noMergeUntil)merged=false;
+  if(merged)mergeAt=now;
+
+  // fist while purple is held -> explode purple
+  if(merged&&state.mix.a>.35&&((R&&R.fist)||(L&&L.fist))){
+    explode(state.mix,COL.mix);noMergeUntil=now+900;merged=false;
+  }
+
+  // hold the pose = charge purple; index snaps open (flick) = release
+  let charge=null;
+  if(loadedAt&&now-loadedAt>6000)loadedAt=0;
+  ['right','left'].forEach(k=>{
+    const h=hands[k];
+    if(!h){hist[k].length=0;return}
+    const pose=isPose(h.l),a=hist[k];a.push(pose);if(a.length>3)a.shift();
+    const held=a.length===3&&a.every(Boolean);
+    if(held&&!loadedAt&&(now-mergeAt<4000||state.mix.a>.1)&&now-lastFlick>900){loadedAt=now;loadedSide=k}
+    if(loadedAt&&loadedSide===k){
+      if(pose){const q=tg(h);charge={x:q.x,y:q.y,r:Math.max(26,q.r*1.1)};lastMixT=charge}
+      else if(now-loadedAt>250&&d3(h.l[8],h.l[0])>d3(h.l[6],h.l[0])*1.1){
+        if(lastMixT)Object.assign(state.mix,lastMixT);
+        lastFlick=now;loadedAt=0;launch();charge=null;merged=false;
+      }
+    }
+  });
+  if(charge)merged=false;
+
+  showOrb(state.mix,COL.mix,'murasaki',merged?mt:charge);
+  ['right','left'].forEach(k=>{
+    const h=hands[k],o=state[k];
+    if(h){
+      drawBox(h.b,merged?COL.mix:COL[k],h.open||h.fist);
+      if(h.fist&&o.a>.35&&!merged){explode(o,COL[k]);return}
+    }
+    showOrb(o,COL[k],KIND[k],(h&&h.open&&!merged)?tg(h):null);
+  });
+  drawFx();
+
+  st.textContent=shot?'🟣 ปล่อยบอลม่วง!':
+    charge?'🟣 ชาร์จแล้ว — ดีดนิ้วชี้ออกเพื่อปล่อย':
+    merged?'🟣 Murasaki — ประสานมือแล้ว (ทำท่านิ้วชี้แตะโป้งเพื่อปล่อย, กำมือเพื่อระเบิด)':
+    !R&&!L?'ยังไม่พบมือ — ยกมือให้อยู่ในกล้อง':
+    ((R&&R.open?'มือขวา Ao (ฟ้า)  ':'')+(L&&L.open?'มือซ้าย Aka (แดง)  ':''))||'แบมือให้เห็นนิ้วครบ หรือกำมือเพื่อระเบิด';
+}
+
+btn.onclick=async()=>{
+  btn.disabled=true;st.textContent='กำลังเปิดกล้องและโหลดโมเดล…';
+  try{
+    AC=new (window.AudioContext||window.webkitAudioContext)();
+    if('speechSynthesis' in window)speechSynthesis.speak(new SpeechSynthesisUtterance(''));
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:640,height:480},audio:false});
+    v.srcObject=stream;await v.play();
+    c.width=v.videoWidth||640;c.height=v.videoHeight||480;
+    const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`});
+    hands.setOptions({maxNumHands:2,modelComplexity:1,minDetectionConfidence:.6,minTrackingConfidence:.5});
+    hands.onResults(onResults);
+    let busy=false;
+    (function loop(){
+      if(!busy&&v.readyState>=2){busy=true;hands.send({image:v}).finally(()=>busy=false)}
+      requestAnimationFrame(loop);
+    })();
+    btn.style.display='none';
+  }catch(e){
+    st.textContent='เปิดกล้องไม่ได้: '+(e.message||e);
+    btn.disabled=false;
+  }
+};
+</script>
+</body>
+</html>
