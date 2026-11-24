@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Hand Orbs</title>
+<style>
+:root{--bg:#0b0d14;--fg:#e8eaf2;--card:#151826;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0b0d14;--fg:#e8eaf2;--card:#151826}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Noto Sans Thai",sans-serif;display:flex;flex-direction:column;align-items:center;gap:12px;padding:12px;min-height:100vh}
+h1{font-size:18px;margin:4px 0 0}
+#stage{position:relative;width:100%;max-width:720px;aspect-ratio:4/3;background:#000;border-radius:14px;overflow:hidden}
+video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}
+#status{font-size:14px;opacity:.85;text-align:center;min-height:20px}
+button{background:#3b82f6;color:#fff;border:0;border-radius:10px;padding:12px 22px;font-size:16px;cursor:pointer}
+.legend{display:flex;gap:14px;font-size:13px;flex-wrap:wrap;justify-content:center}
+.dot{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:5px;vertical-align:middle}
+</style>
+</head>
+<body>
+<h1>🖐️ แบมือเพื่อเรียกลูกแก้ว</h1>
+<div class="legend">
+  <span><i class="dot" style="background:#3b82f6"></i>มือขวา = ฟ้า</span>
+  <span><i class="dot" style="background:#ef4444"></i>มือซ้าย = แดง</span>
+  <span><i class="dot" style="background:#a855f7"></i>รวมมือ = ม่วง</span>
+</div>
+<div id="stage"><video id="v" playsinline muted></video><canvas id="c"></canvas></div>
+<div id="status">กด “เริ่มกล้อง” แล้วอนุญาตการใช้กล้อง</div>
+<button id="btn">เริ่มกล้อง</button>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+<script>
+const v=document.getElementById('v'),c=document.getElementById('c'),ctx=c.getContext('2d');
+const st=document.getElementById('status'),btn=document.getElementById('btn');
+const COL={right:'#3b82f6',left:'#ef4444',mix:'#a855f7'};
+const state={right:{x:0,y:0,r:0,a:0},left:{x:0,y:0,r:0,a:0},mix:{x:0,y:0,r:0,a:0}};
+let t=0;
+
+function isOpen(l){
+  const w=l[0];let n=0;
+  [[8,6],[12,10],[16,14],[20,18]].forEach(([tip,pip])=>{
+    const dt=Math.hypot(l[tip].x-w.x,l[tip].y-w.y),dp=Math.hypot(l[pip].x-w.x,l[pip].y-w.y);
+    if(dt>dp*1.15)n++;
+  });
+  return n>=4;
+}
+function boxOf(l){
+  let x0=1,y0=1,x1=0,y1=0;
+  l.forEach(p=>{x0=Math.min(x0,p.x);y0=Math.min(y0,p.y);x1=Math.max(x1,p.x);y1=Math.max(y1,p.y)});
+  const pad=0.03;return{x0:x0-pad,y0:y0-pad,x1:x1+pad,y1:y1+pad};
+}
+function drawBox(b,color,open){
+  const W=c.width,H=c.height;
+  ctx.lineWidth=3;ctx.strokeStyle=color;ctx.globalAlpha=open?1:.5;
+  ctx.setLineDash(open?[]:[8,6]);
+  ctx.beginPath();ctx.roundRect(b.x0*W,b.y0*H,(b.x1-b.x0)*W,(b.y1-b.y0)*H,10);ctx.stroke();
+  ctx.setLineDash([]);ctx.globalAlpha=1;
+}
+function orb(o,color,target,k){
+  // smooth toward target
+  o.x+=(target.x-o.x)*k;o.y+=(target.y-o.y)*k;o.r+=(target.r-o.r)*k;o.a+=(target.a-o.a)*.2;
+  if(o.a<.02||o.r<2)return;
+  const r=o.r*(1+Math.sin(t*3)*.04);
+  ctx.save();ctx.globalAlpha=o.a;
+  ctx.shadowColor=color;ctx.shadowBlur=r*.9;
+  const g=ctx.createRadialGradient(o.x-r*.35,o.y-r*.35,r*.08,o.x,o.y,r);
+  g.addColorStop(0,'#ffffff');g.addColorStop(.25,color);g.addColorStop(1,'#000000aa');
+  ctx.fillStyle=g;ctx.beginPath();ctx.arc(o.x,o.y,r,0,7);ctx.fill();
+  ctx.restore();
+}
+
+function onResults(res){
+  t+=.016;
+  const W=c.width,H=c.height;
+  ctx.clearRect(0,0,W,H);
+  const hands={right:null,left:null};
+  (res.multiHandLandmarks||[]).forEach((l,i)=>{
+    // input is not mirrored, so MediaPipe's label is swapped
+    const label=res.multiHandedness[i].label;
+    const side=label==='Left'?'right':'left';
+    if(!hands[side])hands[side]={l,b:boxOf(l),open:isOpen(l)};
+  });
+  const R=hands.right,L=hands.left;
+  const tg=h=>{const bw=(h.b.x1-h.b.x0)*W,bh=(h.b.y1-h.b.y0)*H;
+    return{x:(h.b.x0+h.b.x1)/2*W,y:(h.b.y0+h.b.y1)/2*H,r:Math.max(18,Math.min(bw,bh)*.38),a:1}};
+
+  let merged=false;
+  if(R&&L&&R.open&&L.open){
+    const ov=!(R.b.x1<L.b.x0||L.b.x1<R.b.x0||R.b.y1<L.b.y0||L.b.y1<R.b.y0);
+    const a=tg(R),b=tg(L);
+    const d=Math.hypot(a.x-b.x,a.y-b.y);
+    merged=ov||d<(a.r+b.r)*1.6;
+    if(merged){
+      const mt={x:(a.x+b.x)/2,y:(a.y+b.y)/2,r:(a.r+b.r)*.75,a:1};
+      orb(state.mix,COL.mix,mt,.3);
+    }
+  }
+  if(!merged)state.mix.a*=.7;
+  [['right',R],['left',L]].forEach(([k,h])=>{
+    if(h){
+      drawBox(h.b,merged?COL.mix:COL[k],h.open);
+      if(h.open&&!merged){
+        if(state[k].a<.05){const q=tg(h);state[k].x=q.x;state[k].y=q.y;state[k].r=q.r}
+        orb(state[k],COL[k],tg(h),.35);
+      }else state[k].a*=.6;
+    }else state[k].a*=.6;
+  });
+  if(merged){state.right.a*=.4;state.left.a*=.4}
+  // fading orbs
+  ['right','left'].forEach(k=>{if(state[k].a>.02&&!(hands[k]&&hands[k].open&&!merged))orb(state[k],COL[k],state[k],0)});
+  if(state.mix.a>.02&&!merged)orb(state.mix,COL.mix,state.mix,0);
+
+  st.textContent=!R&&!L?'ยังไม่พบมือ — ยกมือให้อยู่ในกล้อง':
+    merged?'💜 รวมมือกันแล้ว: สีม่วง':
+    (R&&R.open?'มือขวาแบ (ฟ้า) ':'')+(L&&L.open?'มือซ้ายแบ (แดง)':'')||'กำลังตรวจจับ… ลองแบมือให้เห็นนิ้วครบ';
+}
+
+btn.onclick=async()=>{
+  btn.disabled=true;st.textContent='กำลังเปิดกล้องและโหลดโมเดล…';
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:640,height:480},audio:false});
+    v.srcObject=stream;await v.play();
+    c.width=v.videoWidth||640;c.height=v.videoHeight||480;
+    const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`});
+    hands.setOptions({maxNumHands:2,modelComplexity:1,minDetectionConfidence:.6,minTrackingConfidence:.5});
+    hands.onResults(onResults);
+    let busy=false;
+    (function loop(){
+      if(!busy&&v.readyState>=2){busy=true;hands.send({image:v}).finally(()=>busy=false)}
+      requestAnimationFrame(loop);
+    })();
+    btn.style.display='none';
+  }catch(e){
+    st.textContent='เปิดกล้องไม่ได้: '+(e.message||e)+' — ลองเปิดหน้านี้ในเบราว์เซอร์โดยตรง';
+    btn.disabled=false;
+  }
+};
+</script>
+</body>
+</html>
